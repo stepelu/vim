@@ -48,6 +48,7 @@ int vpeekc(void);
 int vpeekc_nomap(void);
 int vpeekc_any(void);
 int char_avail(void);
+int input_pending_wheel(void);
 void f_getchar(typval_T *argvars, typval_T *rettv);
 void f_getcharstr(typval_T *argvars, typval_T *rettv);
 void f_getcharmod(typval_T *argvars, typval_T *rettv);

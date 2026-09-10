@@ -476,6 +476,176 @@ func Test_1xterm_mouse_wheel()
   bwipe!
 endfunc
 
+" Use a child terminal: feedkeys(..., 'x') does not run the main loop between
+" wheel commands.
+func s:RunWheelTest(extra)
+  CheckRunVimInTerminal
+  CheckFeature reltime
+  let lines =<< trim END
+    set mouse=a ttymouse=sgr nowrap scrolloff=0
+    call setline(1, range(1, 1000))
+    normal! gg0zt
+    let g:cursor = line('.')
+    let g:topline = line('w0')
+    let g:events = []
+    let g:scrolled = 0
+    let g:frames = []
+    let g:keys = []
+    func Moved()
+      let g:cursor = line('.')
+      let mouse = getmousepos()
+      call add(g:events, [g:cursor, mouse.screenrow, mouse.screencol])
+    endfunc
+    autocmd CursorMoved * call Moved()
+    autocmd WinScrolled * let g:topline = line('w0') | let g:scrolled += 1
+    func Observe()
+      call writefile([json_encode(#{view: winsaveview(), cursor: g:cursor,
+            \ topline: g:topline, events: g:events, scrolled: g:scrolled,
+            \ frames: g:frames, keys: g:keys})], 'XWheelResult')
+      return ''
+    endfunc
+    nnoremap <F3> <Cmd>let g:events = []<Bar>let g:scrolled = 0<Bar>let g:frames = []<CR>
+    nnoremap <expr> <F4> Observe()
+  END
+  call writefile(lines + a:extra, 'XWheelTest', 'D')
+  let buf = RunVimInTerminal('-S XWheelTest', #{rows: 10, cols: 40})
+  call term_sendkeys(buf, "\<F3>")
+  call TermWait(buf)
+  return buf
+endfunc
+
+func s:WheelResult(buf, keys)
+  call delete('XWheelResult')
+  call term_sendkeys(a:buf, a:keys)
+  call WaitFor({-> filereadable('XWheelResult') && !empty(readfile('XWheelResult'))})
+  return json_decode(readfile('XWheelResult')[0])
+endfunc
+
+func Test_term_mouse_wheel_queue()
+  let buf = s:RunWheelTest([])
+  defer delete('XWheelResult')
+
+  try
+    " An isolated wheel must refresh without waiting for more input.
+    call term_sendkeys(buf, "\<Esc>[<65;1;1M")
+    call WaitForAssert({-> assert_equal('4', term_getline(buf, 1))})
+    let idle = s:WheelResult(buf, "\<F4>")
+    call assert_equal([[4, 1, 1]], idle.events)
+    call assert_equal(1, idle.scrolled)
+
+    let queued = s:WheelResult(buf, repeat("\<Esc>[<65;1;1M", 32) .. "\<F4>")
+    call assert_equal(100, queued.view.topline)
+    call assert_equal(100, queued.view.lnum)
+    call assert_equal(100, queued.cursor)
+    call assert_equal(100, queued.topline)
+    " WinScrolled remains synchronous, even when CursorMoved is deferred.
+    call assert_equal(33, queued.scrolled)
+    call WaitForAssert({-> assert_equal('100', term_getline(buf, 1))})
+  finally
+    call StopVimInTerminal(buf)
+  endtry
+
+  " Bound windows also report their scroll changes between wheel commands.
+  let buf = s:RunWheelTest(['leftabove vsplit', 'windo set scrollbind', 'wincmd h'])
+  defer StopVimInTerminal(buf)
+  let bound = s:WheelResult(buf,
+        \ "\<F3>" .. repeat("\<Esc>[<65;1;1M", 8) .. "\<F4>")
+  call assert_equal(25, bound.view.topline)
+  call assert_equal(16, bound.scrolled)
+endfunc
+
+func Test_term_mouse_wheel_queue_mappings()
+  defer delete('XWheelResult')
+  let down = repeat("\<Esc>[<65;1;1M", 32)
+  let up = "\<Esc>[<64;1;1M"
+  for [mapping, keys] in [
+        \ ['x', 'x'],
+        \ ['<ScrollWheelUp>', up],
+        \ ['<buffer> <ScrollWheelUp>', up],
+        \ ['<ScrollWheelUp>x', up .. 'x'],
+        \ ['<Esc>[<64;1;1M', up],
+        \ ['<Esc>[<64;1;1Mx', up .. 'x'],
+        \ ['<F5>', up]]
+    let lines = ['nnoremap <expr> ' .. mapping .. ' Observe()']
+    if mapping ==# '<F5>'
+      call add(lines, 'let &t_k5 = "\<Esc>[<64;1;1M"')
+    endif
+    let buf = s:RunWheelTest(lines)
+    try
+      let result = s:WheelResult(buf, down .. keys)
+      call assert_equal(97, result.view.lnum, mapping)
+      call assert_equal(result.view.lnum, result.cursor, mapping)
+      call assert_equal(result.view.topline, result.topline, mapping)
+      call assert_equal(32, result.scrolled, mapping)
+    finally
+      call StopVimInTerminal(buf)
+    endtry
+  endfor
+
+  " Looking ahead must not decode the next click before CursorMoved.
+  " Queue the reset too, so the first wheel starts with a fresh refresh budget.
+  let buf = s:RunWheelTest([])
+  try
+    let result = s:WheelResult(buf, "\<F3>\<Esc>[<65;1;1M\<Esc>[<0;4;5M\<F4>")
+    call assert_equal([[4, 1, 1], [8, 5, 4]], result.events)
+  finally
+    call StopVimInTerminal(buf)
+  endtry
+
+  let lines =<< trim END
+    autocmd KeyInputPre n if v:char ==# "\<ScrollWheelDown>"
+          \ | call add(g:keys, [line('.'), g:cursor]) | endif
+  END
+  let buf = s:RunWheelTest(lines)
+  defer StopVimInTerminal(buf)
+  let result = s:WheelResult(buf, "\<F3>" .. repeat("\<Esc>[<65;1;1M", 2) .. "\<F4>")
+  call assert_equal([[1, 1], [4, 4]], result.keys)
+endfunc
+
+func Test_term_mouse_wheel_queue_smoothscroll()
+  defer delete('XWheelResult')
+  let lines =<< trim END
+    set wrap smoothscroll scrolloff=99
+    call setline(1, [repeat('a', 211), repeat('b', 600)])
+    3,$delete _
+    normal! gg0zt
+  END
+  let results = []
+  for queued in [0, 1]
+    let buf = s:RunWheelTest(lines)
+    try
+      for _ in range(queued ? 1 : 3)
+        let result = s:WheelResult(buf,
+              \ repeat("\<Esc>[<65;1;1M", queued ? 3 : 1) .. "\<F4>")
+      endfor
+      call assert_true(result.view.topline > 1 || result.view.skipcol > 0)
+      call TermWait(buf)
+      call add(results, [result.view,
+            \ map(range(1, 10), {_, row -> term_getline(buf, row)})])
+    finally
+      call StopVimInTerminal(buf)
+    endtry
+  endfor
+  call assert_equal(results[0], results[1])
+endfunc
+
+func Test_term_mouse_wheel_queue_redraw()
+  let lines =<< trim END
+    autocmd WinScrolled * sleep 10m
+    call redraw_listener_add(#{on_end: {-> add(g:frames, line('w0'))}})
+  END
+  let buf = s:RunWheelTest(lines)
+  defer StopVimInTerminal(buf)
+  defer delete('XWheelResult')
+  let result = s:WheelResult(buf, repeat("\<Esc>[<65;1;1M", 8) .. "\<F4>")
+  call assert_equal(25, result.view.topline)
+  call assert_equal(8, result.scrolled)
+  " The slow callback exhausts the refresh budget while input is still queued.
+  " Require intermediate frames without depending on their exact number.
+  let intermediate = filter(result.frames, {_, top -> top > 4 && top < 25})
+  call assert_true(len(uniq(sort(intermediate, 'n'))) > 1, string(intermediate))
+endfunc
+
 " Test that dragging beyond the window (at the bottom and at the top)
 " scrolls window content by the number of lines beyond the window.
 func Test_term_mouse_drag_beyond_window()

@@ -77,6 +77,7 @@ void scroll_region_reset(void);
 void clear_termcodes(void);
 void add_termcode(char_u *name, char_u *string, int flags);
 char_u *find_termcode(char_u *name);
+int term_pending_wheel(char_u *buf, int len);
 char_u *get_termcode(int i);
 int get_termcode_len(int idx);
 void del_termcode(char_u *name);

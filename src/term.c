@@ -4858,6 +4858,70 @@ find_termcode(char_u *name)
     return NULL;
 }
 
+#if defined(FEAT_RELTIME) && defined(FEAT_MOUSE_XTERM)
+/*
+ * Recognize a complete, unmodified SGR wheel report without decoding input.
+ * Other protocols and overlapping terminal key codes need check_termcode().
+ */
+    int
+term_pending_wheel(char_u *buf, int len)
+{
+    char_u	*prefix = (char_u *)(buf[0] == ESC ? "\033[<" : "\233<");
+    int		prefix_len = (int)STRLEN(prefix);
+    int		pos = prefix_len;
+    int		button;
+    int		found = FALSE;
+    static int	wheel_keys[] = {
+	K_MOUSEDOWN, K_MOUSEUP, K_MOUSERIGHT, K_MOUSELEFT
+    };
+
+    if (len < pos + 3 || STRNCMP(buf, prefix, prefix_len) != 0
+	    || buf[pos] != '6' || buf[pos + 1] < '4' || buf[pos + 1] > '7'
+	    || buf[pos + 2] != ';')
+	return NUL;
+    button = buf[pos + 1] - '4';
+    pos += 3;
+    for (int i = 0; i < 2; ++i)
+    {
+	if (pos >= len || !VIM_ISDIGIT(buf[pos]))
+	    return NUL;
+	while (pos < len && VIM_ISDIGIT(buf[pos]))
+	    ++pos;
+	if (pos >= len || buf[pos++] != (i == 0 ? ';' : 'M'))
+	    return NUL;
+    }
+
+    for (int i = 0; i < tc_len; ++i)
+    {
+	int n = termcodes[i].modlen > 0
+				? termcodes[i].modlen : termcodes[i].len;
+
+	if (STRNCMP(termcodes[i].code, prefix, MIN(n, prefix_len)) != 0)
+	    continue;
+	// A numeric modifier cannot match the '[' or '<' in the SGR prefix.
+	if (termcodes[i].modlen > 0 && n < prefix_len
+		&& termcodes[i].code[termcodes[i].len - 1] != prefix[n])
+	    continue;
+	if (termcodes[i].len == prefix_len + 2
+		&& termcodes[i].code[prefix_len] == '*'
+		&& termcodes[i].name[1] == KE_FILLER)
+	{
+	    if (termcodes[i].name[0] == KS_SGR_MOUSE
+		    && termcodes[i].code[prefix_len + 1] == 'M')
+	    {
+		found = TRUE;
+		continue;
+	    }
+	    if (termcodes[i].name[0] == KS_SGR_MOUSE_RELEASE
+		    && termcodes[i].code[prefix_len + 1] == 'm')
+		continue;
+	}
+	return NUL;
+    }
+    return found ? wheel_keys[button] : NUL;
+}
+#endif
+
     char_u *
 get_termcode(int i)
 {

@@ -1414,6 +1414,13 @@ main_loop(
     oparg_T	oa;		// operator arguments
     oparg_T	*prev_oap;	// operator arguments
     volatile int previous_got_int = FALSE;	// "got_int" was TRUE
+    int		previous_cmd UNUSED;
+#ifdef FEAT_RELTIME
+    proftime_T	wheel_redraw_limit;
+    int		wheel_redraw_pending;
+    // Time in milliseconds to process queued wheels between redraws.
+    const long	wheel_redraw_interval = 8;
+#endif
 
     prev_oap = current_oap;
     current_oap = &oa;
@@ -1427,6 +1434,11 @@ main_loop(
 	x_restore_state();
 #endif
 
+    previous_cmd = NUL;
+#ifdef FEAT_RELTIME
+    wheel_redraw_pending = FALSE;
+    profile_setlimit(wheel_redraw_interval, &wheel_redraw_limit);
+#endif
     clear_oparg(&oa);
     while (!cmdwin || cmdwin_result == 0)
     {
@@ -1486,6 +1498,19 @@ main_loop(
 	// it's not safe unless may_trigger_safestate_main() is called
 	was_safe = FALSE;
 
+#ifdef FEAT_RELTIME
+	int wheel = !VIsual_active && !curwin->w_p_scb && !curwin->w_p_crb
+# ifdef FEAT_GUI
+	    && !gui.in_use
+# endif
+# ifdef FEAT_DIFF
+	    && !diff_need_scrollbind && !curtab->tp_diff_update
+	    && !curtab->tp_diff_invalid
+# endif
+	    && (previous_cmd == K_MOUSEUP || previous_cmd == K_MOUSEDOWN
+		|| previous_cmd == K_MOUSELEFT || previous_cmd == K_MOUSERIGHT);
+#endif
+
 	/*
 	 * If skip redraw is set (for ":" in wait_return()), don't redraw now.
 	 * If there is nothing in the stuff_buffer or do_redraw is TRUE,
@@ -1497,6 +1522,17 @@ main_loop(
 	    setcursor();
 	    cursor_on();
 	}
+#ifdef FEAT_RELTIME
+	else if (wheel && !do_redraw
+		&& !profile_passed_limit(&wheel_redraw_limit)
+		&& input_pending_wheel())
+	{
+	    // The next wheel event still needs valid cursor and viewport positions.
+	    update_topline();
+	    validate_cursor();
+	    wheel_redraw_pending = TRUE;
+	}
+#endif
 	else if (do_redraw || stuff_empty())
 	{
 #ifdef FEAT_GUI
@@ -1606,6 +1642,14 @@ main_loop(
 
 	    do_redraw = FALSE;
 
+#ifdef FEAT_RELTIME
+	    if (wheel_redraw_pending)
+		out_flush_cursor(FALSE, FALSE);
+	    wheel_redraw_pending = FALSE;
+	    // Let queued wheel input advance even when drawing takes longer.
+	    profile_setlimit(wheel_redraw_interval, &wheel_redraw_limit);
+#endif
+
 #ifdef STARTUPTIME
 	    // Now that we have drawn the first screen all the startup stuff
 	    // has been done, close any file for startup messages.
@@ -1647,6 +1691,7 @@ main_loop(
 	 * If we're invoked as ex, do a round of ex commands.
 	 * Otherwise, get and execute a normal mode command.
 	 */
+	previous_cmd = NUL;
 	if (exmode_active)
 	{
 	    if (noexmode)   // End of ":global/path/visual" commands
@@ -1665,7 +1710,7 @@ main_loop(
 		// in Normal mode.  With FAIL we first need to position the
 		// cursor and the screen needs to be redrawn.
 		if (terminal_loop(TRUE) == OK)
-		    normal_cmd(&oa, TRUE);
+		    previous_cmd = normal_cmd(&oa, TRUE);
 	    }
 	    else
 #endif
@@ -1673,7 +1718,7 @@ main_loop(
 #ifdef FEAT_TERMINAL
 		skip_term_loop = FALSE;
 #endif
-		normal_cmd(&oa, TRUE);
+		previous_cmd = normal_cmd(&oa, TRUE);
 	    }
 	}
     }

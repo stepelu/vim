@@ -2406,6 +2406,87 @@ char_avail(void)
     return (retval != NUL);
 }
 
+#ifdef FEAT_RELTIME
+/*
+ * Check for an unmapped wheel event already in the typeahead buffer.
+ */
+    int
+input_pending_wheel(void)
+{
+    char_u	*keys;
+    char_u	*noremap;
+# ifdef FEAT_MOUSE_XTERM
+    char_u	wheel[3] = {K_SPECIAL, KS_EXTRA, NUL};
+# endif
+    mapblock_T	*maps[2];
+    int		mode;
+    int		key;
+
+    if (*p_pt != NUL || allow_keys != 0 || !stuff_empty()
+	    || can_get_old_char() || typeahead_char != 0 || typebuf.tb_len < 3)
+	return FALSE;
+    // These callbacks may replace the next key or observe the previous redraw.
+    if (has_keyinputpre()
+# ifdef FEAT_PROP_POPUP
+	    || popup_visible
+# endif
+	    )
+	return FALSE;
+
+    mode = get_real_state();
+    keys = typebuf.tb_buf + typebuf.tb_off;
+    if (keys[0] == ESC || keys[0] == CSI)
+    {
+# ifdef FEAT_MOUSE_XTERM
+	// Do not decode ahead: that would change mouse coordinates too early.
+	if (no_mapping != 0 || typebuf.tb_maplen != 0 || mod_mask != 0)
+	    return FALSE;
+	// Raw escape mappings take precedence over decoding terminal keys.
+	maps[0] = get_buf_maphash_list(mode, keys[0]);
+	maps[1] = get_maphash_list(mode, keys[0]);
+	for (int i = 0; i < 2; ++i)
+	    for (mapblock_T *mp = maps[i]; mp != NULL; mp = mp->m_next)
+		if ((mp->m_mode & mode) && mp->m_keys[0] == keys[0])
+		    return FALSE;
+
+	key = term_pending_wheel(keys, typebuf.tb_len);
+	if (key == NUL)
+	    return FALSE;
+	wheel[2] = KEY2TERMCAP1(key);
+	keys = wheel;
+# else
+	return FALSE;
+# endif
+    }
+    if (keys[0] != K_SPECIAL || keys[1] != KS_EXTRA)
+	return FALSE;
+    key = TO_SPECIAL(keys[1], keys[2]);
+    if (key != K_MOUSEUP && key != K_MOUSEDOWN
+	    && key != K_MOUSELEFT && key != K_MOUSERIGHT)
+	return FALSE;
+
+    noremap = typebuf.tb_noremap + typebuf.tb_off;
+    if (no_mapping != 0 || (noremap[0] & ~RM_SIMPLIFIED) == RM_SCRIPT
+	    || ((noremap[0] | noremap[1] | noremap[2]) & (RM_NONE | RM_ABBR)))
+	return TRUE;
+
+    maps[0] = get_buf_maphash_list(mode, K_SPECIAL);
+    maps[1] = get_maphash_list(mode, K_SPECIAL);
+    for (int i = 0; i < 2; ++i)
+	for (mapblock_T *mp = maps[i]; mp != NULL; mp = mp->m_next)
+	{
+	    int offset = (mp->m_keylen >= 6
+			    && mp->m_keys[1] == KS_MODIFIER) ? 3 : 0;
+
+	    // Leave partial wheel mappings to the mapping engine too.
+	    if ((mp->m_mode & mode) && mp->m_keylen >= offset + 3
+		    && STRNCMP(mp->m_keys + offset, keys, 3) == 0)
+		return FALSE;
+	}
+    return TRUE;
+}
+#endif
+
 #if defined(FEAT_EVAL)
 /*
  * "getchar()" and "getcharstr()" functions

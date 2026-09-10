@@ -677,9 +677,9 @@ normal_cmd_wait_for_msg(void)
 }
 
 /*
- * Execute a command in Normal mode.
+ * Execute a command in Normal mode and return its command character.
  */
-    void
+    int
 normal_cmd(
     oparg_T	*oap,
     int		toplevel UNUSED)	// TRUE when called from main()
@@ -1076,6 +1076,7 @@ normal_end:
 
     // Save count before an operator for next time.
     opcount = ca.opcount;
+    return ca.cmdchar;
 }
 
 #ifdef FEAT_EVAL
